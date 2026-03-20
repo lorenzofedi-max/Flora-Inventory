@@ -70,6 +70,13 @@ export default function App() {
   });
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const setVideoRef = useCallback((node: HTMLVideoElement | null) => {
+    if (node && cameraStream) {
+      node.srcObject = cameraStream;
+      node.play().catch(e => console.error("Video play error:", e));
+    }
+    (videoRef as any).current = node;
+  }, [cameraStream]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // PWA Install Prompt
@@ -112,18 +119,32 @@ export default function App() {
   // Camera handling
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Il tuo browser non supporta l'accesso alla fotocamera.");
+      }
+
+      const constraints = { 
         video: { 
-          facingMode: 'environment',
+          facingMode: { ideal: 'environment' },
           width: { ideal: 1280 },
           height: { ideal: 720 }
         } 
-      });
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        console.warn("Retrying camera with simple constraints...", err);
+        // Fallback to any video source
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
+
       setCameraStream(stream);
       setIsScanning(true);
     } catch (err) {
       console.error("Error accessing camera:", err);
-      alert("Impossibile accedere alla fotocamera. Controlla i permessi nelle impostazioni del browser.");
+      alert(`Errore fotocamera: ${err instanceof Error ? err.message : "Impossibile accedere"}. Controlla i permessi nelle impostazioni.`);
     }
   };
 
@@ -138,9 +159,15 @@ export default function App() {
   // Attach stream to video element when it's ready
   useEffect(() => {
     if (isScanning && cameraStream && videoRef.current) {
-      videoRef.current.srcObject = cameraStream;
-      // Explicit play for iOS
-      videoRef.current.play().catch(e => console.error("Video play error:", e));
+      const video = videoRef.current;
+      if (video.srcObject !== cameraStream) {
+        video.srcObject = cameraStream;
+      }
+      video.play().catch(e => {
+        console.error("Video play error in effect:", e);
+        // Fallback: try playing again on user interaction or after a short delay
+        setTimeout(() => video.play().catch(() => {}), 500);
+      });
     }
   }, [isScanning, cameraStream]);
 
@@ -274,12 +301,13 @@ export default function App() {
       const file = new File([blob], fileName, { type: blob.type });
 
       // Check if sharing is supported
-      const shareTitle = `Inventario ${chain || 'Flora'} - ${storeName || 'Negozio'} (${dateStr})`;
+      const shareTitle = `Inventario ${chain || 'Flora'} ${storeName || 'Negozio'} ${dateStr}`;
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
           title: shareTitle,
-          text: `In allegato l'inventario aggiornato per ${chain || 'Flora'} - ${storeName || 'Negozio'} del ${dateStr}.`,
+          // Note: On some iOS versions, providing 'text' can cause the 'title' (subject) to be ignored.
+          // We prioritize the subject (title) as requested.
         });
       } else {
         // Fallback to standard download
@@ -638,10 +666,14 @@ export default function App() {
           >
             <div className="relative flex-1 overflow-hidden">
               <video 
-                ref={videoRef} 
+                ref={setVideoRef} 
                 autoPlay 
                 playsInline 
                 muted
+                onLoadedMetadata={(e) => {
+                  const v = e.currentTarget;
+                  v.play().catch(err => console.error("onLoadedMetadata play error:", err));
+                }}
                 className="w-full h-full object-cover"
               />
               
@@ -678,17 +710,27 @@ export default function App() {
               </div>
 
               {/* Top Controls */}
-              <div className="absolute top-8 left-8 right-8 flex justify-between items-start">
+              <div className="absolute top-8 left-8 right-8 flex justify-between items-center">
                 <div className="flex flex-col gap-1">
                   <h3 className="text-white font-serif italic text-xl">Scanner AI</h3>
                   <p className="text-white/60 text-xs uppercase tracking-widest">Riconoscimento Articolo</p>
                 </div>
-                <button 
-                  onClick={stopCamera}
-                  className="p-4 bg-white/10 backdrop-blur-xl text-white rounded-full hover:bg-white/20 transition-all border border-white/10 active:scale-90"
-                >
-                  <X size={24} />
-                </button>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={startCamera}
+                    className="p-4 bg-white/10 backdrop-blur-xl text-white rounded-full hover:bg-white/20 transition-all border border-white/10 active:scale-90"
+                    title="Riprova"
+                  >
+                    <Loader2 size={24} className={isScanningAI ? "animate-spin" : ""} />
+                  </button>
+                  <button 
+                    onClick={stopCamera}
+                    className="p-4 bg-rose-500/80 backdrop-blur-xl text-white rounded-full hover:bg-rose-600 transition-all border border-white/10 active:scale-90"
+                    title="Chiudi"
+                  >
+                    <X size={24} />
+                  </button>
+                </div>
               </div>
             </div>
 
