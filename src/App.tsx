@@ -54,6 +54,7 @@ export default function App() {
   const [storeName, setStoreName] = useState(() => localStorage.getItem('flora_store') || '');
   const [isScanning, setIsScanning] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [videoPlaying, setVideoPlaying] = useState(false);
   const [isScanningAI, setIsScanningAI] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -73,7 +74,12 @@ export default function App() {
   const setVideoRef = useCallback((node: HTMLVideoElement | null) => {
     if (node && cameraStream) {
       node.srcObject = cameraStream;
-      node.play().catch(e => console.error("Video play error:", e));
+      node.play()
+        .then(() => setVideoPlaying(true))
+        .catch(e => {
+          console.error("Video play error:", e);
+          setVideoPlaying(false);
+        });
     }
     (videoRef as any).current = node;
   }, [cameraStream]);
@@ -163,11 +169,20 @@ export default function App() {
       if (video.srcObject !== cameraStream) {
         video.srcObject = cameraStream;
       }
-      video.play().catch(e => {
-        console.error("Video play error in effect:", e);
-        // Fallback: try playing again on user interaction or after a short delay
-        setTimeout(() => video.play().catch(() => {}), 500);
-      });
+      video.play()
+        .then(() => setVideoPlaying(true))
+        .catch(e => {
+          console.error("Video play error in effect:", e);
+          setVideoPlaying(false);
+          // Fallback: try playing again on user interaction or after a short delay
+          setTimeout(() => {
+            if (video) {
+              video.play()
+                .then(() => setVideoPlaying(true))
+                .catch(() => setVideoPlaying(false));
+            }
+          }, 1000);
+        });
     }
   }, [isScanning, cameraStream]);
 
@@ -189,17 +204,40 @@ export default function App() {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     
+    // Ensure video dimensions are available
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      alert("La fotocamera non è ancora pronta. Attendi un istante e riprova.");
+      setIsScanningAI(false);
+      return;
+    }
+
     // Use higher resolution for better OCR
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      alert("Errore tecnico: impossibile creare il contesto del canvas.");
+      setIsScanningAI(false);
+      return;
+    }
     
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 
+    if (!base64Image || base64Image.length < 100) {
+      alert("Errore nella cattura dell'immagine. Riprova.");
+      setIsScanningAI(false);
+      return;
+    }
+
     try {
-      const response = await ai.models.generateContent({
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey === 'YOUR_API_KEY') {
+        throw new Error("Chiave API non configurata. Inserisci GEMINI_API_KEY nei 'Secrets' delle impostazioni (icona ingranaggio in alto a destra).");
+      }
+
+      const aiClient = new GoogleGenAI({ apiKey });
+      const response = await aiClient.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
@@ -214,15 +252,14 @@ export default function App() {
       const articleName = response.text?.trim().replace(/^["']|["']$/g, "") || "";
       if (articleName) {
         setFormData(prev => ({ ...prev, article: articleName }));
-        // Small delay to let the user see the "success" state if we had one, 
-        // but here we just close for smoothness
         setTimeout(() => stopCamera(), 300);
       } else {
-        alert("Non sono riuscito a leggere l'articolo. Prova ad avvicinarti o a migliorare l'illuminazione.");
+        alert("L'IA non ha restituito un nome. Prova a inquadrare meglio l'etichetta.");
       }
     } catch (err) {
       console.error("AI Scan error:", err);
-      alert("Errore durante la scansione AI. Riprova.");
+      const errorMessage = err instanceof Error ? err.message : "Errore sconosciuto";
+      alert(`Errore Scansione: ${errorMessage}`);
     } finally {
       setIsScanningAI(false);
     }
@@ -672,10 +709,33 @@ export default function App() {
                 muted
                 onLoadedMetadata={(e) => {
                   const v = e.currentTarget;
-                  v.play().catch(err => console.error("onLoadedMetadata play error:", err));
+                  v.play()
+                    .then(() => setVideoPlaying(true))
+                    .catch(err => {
+                      console.error("onLoadedMetadata play error:", err);
+                      setVideoPlaying(false);
+                    });
                 }}
+                onPlay={() => setVideoPlaying(true)}
                 className="w-full h-full object-cover"
               />
+
+              {!videoPlaying && isScanning && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-20">
+                  <button 
+                    onClick={() => {
+                      if (videoRef.current) {
+                        videoRef.current.play()
+                          .then(() => setVideoPlaying(true))
+                          .catch(e => alert("Tocca di nuovo per sbloccare la fotocamera."));
+                      }
+                    }}
+                    className="bg-emerald-600 text-white px-8 py-4 rounded-full font-bold shadow-2xl animate-bounce"
+                  >
+                    Sblocca Fotocamera
+                  </button>
+                </div>
+              )}
               
               {/* Scan Frame UI */}
               <div className="absolute inset-0 flex items-center justify-center p-8">
