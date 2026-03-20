@@ -17,7 +17,8 @@ import {
   Flower2, 
   Sprout,
   Loader2,
-  ScanLine
+  ScanLine,
+  Search
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -48,10 +49,14 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
 
 export default function App() {
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [chain, setChain] = useState(() => localStorage.getItem('flora_chain') || '');
+  const [storeName, setStoreName] = useState(() => localStorage.getItem('flora_store') || '');
   const [isScanning, setIsScanning] = useState(false);
   const [isScanningAI, setIsScanningAI] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   // Form state
   const [formData, setFormData] = useState<Partial<InventoryItem>>({
@@ -65,6 +70,39 @@ export default function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // PWA Install Prompt
+  useEffect(() => {
+    const handler = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  // Persist settings
+  useEffect(() => {
+    localStorage.setItem('flora_chain', chain);
+  }, [chain]);
+
+  useEffect(() => {
+    localStorage.setItem('flora_store', storeName);
+  }, [storeName]);
+
+  const handleInstallClick = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      setDeferredPrompt(null);
+    }
+  };
+
+  // Filtered items
+  const filteredItems = items.filter(item => 
+    item.article.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
   // Totals
   const totalValue = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
@@ -97,16 +135,29 @@ export default function App() {
   const captureAndScan = async () => {
     if (!videoRef.current || !canvasRef.current) return;
     
+    // Visual flash effect
+    const flash = document.createElement('div');
+    flash.className = 'fixed inset-0 bg-white z-[100] animate-flash';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 300);
+
+    // Haptic feedback if available
+    if ('vibrate' in navigator) {
+      navigator.vibrate(50);
+    }
+
     setIsScanningAI(true);
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    
+    // Use higher resolution for better OCR
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const base64Image = canvas.toDataURL('image/jpeg').split(',')[1];
+    const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 
     try {
       const response = await ai.models.generateContent({
@@ -114,17 +165,21 @@ export default function App() {
         contents: [
           {
             parts: [
-              { text: "Analizza questa etichetta di una pianta o di un fiore. Estrai solo il nome dell'articolo (es. 'Orchidea Phalaenopsis', 'Rosa Rossa', ecc.). Rispondi solo con il nome dell'articolo, niente altro." },
+              { text: "Sei un esperto botanico. Analizza questa etichetta di vivaio. Identifica il nome della pianta o del fiore (es. 'Ficus Benjamina', 'Tulipano Giallo'). Rispondi ESCLUSIVAMENTE con il nome dell'articolo, senza punteggiatura extra o spiegazioni." },
               { inlineData: { mimeType: "image/jpeg", data: base64Image } }
             ]
           }
         ]
       });
 
-      const articleName = response.text?.trim() || "";
+      const articleName = response.text?.trim().replace(/^["']|["']$/g, "") || "";
       if (articleName) {
         setFormData(prev => ({ ...prev, article: articleName }));
-        stopCamera();
+        // Small delay to let the user see the "success" state if we had one, 
+        // but here we just close for smoothness
+        setTimeout(() => stopCamera(), 300);
+      } else {
+        alert("Non sono riuscito a leggere l'articolo. Prova ad avvicinarti o a migliorare l'illuminazione.");
       }
     } catch (err) {
       console.error("AI Scan error:", err);
@@ -180,7 +235,7 @@ export default function App() {
     setShowForm(true);
   };
 
-  const exportToExcel = () => {
+  const exportToExcel = async () => {
     const data = items.map(item => ({
       Tipo: item.type,
       Articolo: item.article,
@@ -194,7 +249,37 @@ export default function App() {
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Inventario");
-    XLSX.writeFile(wb, `Inventario_Flora_${new Date().toLocaleDateString()}.xlsx`);
+    
+    const dateStr = new Date().toISOString().split('T')[0];
+    const cleanChain = chain.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const cleanStore = storeName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    
+    const fileName = `Inventario_${cleanChain || 'Flora'}_${cleanStore || 'Negozio'}_${dateStr}.xlsx`;
+
+    try {
+      // Generate buffer
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const file = new File([blob], fileName, { type: blob.type });
+
+      // Check if sharing is supported
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: 'Inventario Flora',
+          text: 'Ecco l\'inventario aggiornato del negozio.',
+        });
+      } else {
+        // Fallback to standard download
+        XLSX.writeFile(wb, fileName);
+      }
+    } catch (err) {
+      // If user cancels or error occurs, fallback to download if it wasn't an abort
+      if ((err as Error).name !== 'AbortError') {
+        console.error("Export error:", err);
+        XLSX.writeFile(wb, fileName);
+      }
+    }
   };
 
   return (
@@ -226,10 +311,44 @@ export default function App() {
               className="flex items-center gap-2 border border-stone-300 bg-white px-6 py-3 rounded-full hover:bg-stone-100 transition-all shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Download size={20} />
-              <span>Esporta Excel</span>
+              <span className="hidden sm:inline">Esporta Excel</span>
             </button>
+            
+            {deferredPrompt && (
+              <button 
+                onClick={handleInstallClick}
+                className="flex items-center gap-2 bg-stone-900 text-white px-6 py-3 rounded-full hover:bg-black transition-all shadow-md active:scale-95"
+              >
+                <Download size={20} className="rotate-180" />
+                <span>Installa App</span>
+              </button>
+            )}
           </div>
         </header>
+
+        {/* Store Info Inputs */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-stone-400 uppercase tracking-widest ml-4">Catena / Gruppo</label>
+            <input 
+              type="text"
+              value={chain}
+              onChange={(e) => setChain(e.target.value)}
+              placeholder="Es. Flora Toscana"
+              className="w-full px-6 py-3 bg-white border border-stone-100 rounded-full shadow-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-stone-400 uppercase tracking-widest ml-4">Nome Negozio / Punto Vendita</label>
+            <input 
+              type="text"
+              value={storeName}
+              onChange={(e) => setStoreName(e.target.value)}
+              placeholder="Es. Negozio Centrale"
+              className="w-full px-6 py-3 bg-white border border-stone-100 rounded-full shadow-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-sm"
+            />
+          </div>
+        </div>
 
         {/* Stats Summary */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
@@ -249,6 +368,21 @@ export default function App() {
 
         {/* Main Content */}
         <main className="bg-white rounded-3xl shadow-xl border border-stone-100 overflow-hidden">
+          {items.length > 0 && (
+            <div className="p-4 border-b border-stone-100 bg-stone-50/50">
+              <div className="relative max-w-md">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" size={18} />
+                <input 
+                  type="text"
+                  placeholder="Cerca articolo..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-white border border-stone-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-sm"
+                />
+              </div>
+            </div>
+          )}
+
           {items.length === 0 && !showForm ? (
             <div className="py-20 text-center">
               <div className="inline-flex items-center justify-center w-20 h-20 bg-stone-100 rounded-full mb-4">
@@ -273,7 +407,7 @@ export default function App() {
                 </thead>
                 <tbody className="divide-y divide-stone-100">
                   <AnimatePresence mode='popLayout'>
-                    {items.map((item) => (
+                    {filteredItems.map((item) => (
                       <motion.tr 
                         key={item.id}
                         initial={{ opacity: 0, y: 10 }}
@@ -302,17 +436,17 @@ export default function App() {
                           € {(item.price * item.quantity).toFixed(2)}
                         </td>
                         <td className="px-6 py-4">
-                          <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex items-center justify-center gap-2">
                             <button 
                               onClick={() => handleEdit(item)}
-                              className="p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-all"
+                              className="p-2 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 rounded-full transition-all"
                               title="Modifica"
                             >
                               <Edit2 size={18} />
                             </button>
                             <button 
                               onClick={() => handleDelete(item.id)}
-                              className="p-2 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-full transition-all"
+                              className="p-2 text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-full transition-all"
                               title="Elimina"
                             >
                               <Trash2 size={18} />
@@ -322,6 +456,13 @@ export default function App() {
                       </motion.tr>
                     ))}
                   </AnimatePresence>
+                  {filteredItems.length === 0 && items.length > 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-12 text-center text-stone-400 italic">
+                        Nessun articolo trovato per "{searchQuery}"
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -477,8 +618,13 @@ export default function App() {
       {/* Camera Overlay */}
       <AnimatePresence>
         {isScanning && (
-          <div className="fixed inset-0 z-[60] bg-black flex flex-col">
-            <div className="relative flex-1">
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black flex flex-col"
+          >
+            <div className="relative flex-1 overflow-hidden">
               <video 
                 ref={videoRef} 
                 autoPlay 
@@ -487,52 +633,84 @@ export default function App() {
               />
               
               {/* Scan Frame UI */}
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-64 h-32 border-2 border-white/50 rounded-2xl relative">
-                  <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-emerald-500 rounded-tl-lg" />
-                  <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-emerald-500 rounded-tr-lg" />
-                  <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-emerald-500 rounded-bl-lg" />
-                  <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-emerald-500 rounded-br-lg" />
+              <div className="absolute inset-0 flex items-center justify-center p-8">
+                <div className="w-full max-w-sm aspect-[4/3] border-2 border-white/20 rounded-3xl relative overflow-hidden">
+                  {/* Corner Accents */}
+                  <div className="absolute top-0 left-0 w-12 h-12 border-t-4 border-l-4 border-emerald-400 rounded-tl-3xl" />
+                  <div className="absolute top-0 right-0 w-12 h-12 border-t-4 border-r-4 border-emerald-400 rounded-tr-3xl" />
+                  <div className="absolute bottom-0 left-0 w-12 h-12 border-b-4 border-l-4 border-emerald-400 rounded-bl-3xl" />
+                  <div className="absolute bottom-0 right-0 w-12 h-12 border-b-4 border-r-4 border-emerald-400 rounded-br-3xl" />
                   
-                  {isScanningAI && (
-                    <motion.div 
-                      animate={{ top: ['0%', '100%', '0%'] }}
-                      transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                      className="absolute left-0 right-0 h-0.5 bg-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.8)]"
-                    />
-                  )}
+                  {/* Scanning Line Animation */}
+                  <motion.div 
+                    animate={{ 
+                      top: ['5%', '95%', '5%'],
+                      opacity: [0.4, 1, 0.4]
+                    }}
+                    transition={{ 
+                      duration: 2.5, 
+                      repeat: Infinity, 
+                      ease: "easeInOut" 
+                    }}
+                    className="absolute left-4 right-4 h-1 bg-emerald-400/80 shadow-[0_0_20px_rgba(52,211,153,1)] rounded-full z-10"
+                  />
+
+                  {/* Hint Text */}
+                  <div className="absolute inset-0 flex items-end justify-center pb-6">
+                    <p className="text-white/80 text-xs font-medium tracking-widest uppercase bg-black/40 backdrop-blur-sm px-4 py-2 rounded-full border border-white/10">
+                      Allinea l'etichetta qui
+                    </p>
+                  </div>
                 </div>
               </div>
 
-              <div className="absolute top-6 left-6 right-6 flex justify-between items-center">
-                <p className="text-white text-sm font-medium bg-black/40 backdrop-blur-md px-4 py-2 rounded-full">
-                  Inquadra l'etichetta dell'articolo
-                </p>
+              {/* Top Controls */}
+              <div className="absolute top-8 left-8 right-8 flex justify-between items-start">
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-white font-serif italic text-xl">Scanner AI</h3>
+                  <p className="text-white/60 text-xs uppercase tracking-widest">Riconoscimento Articolo</p>
+                </div>
                 <button 
                   onClick={stopCamera}
-                  className="p-3 bg-white/10 backdrop-blur-md text-white rounded-full hover:bg-white/20 transition-all"
+                  className="p-4 bg-white/10 backdrop-blur-xl text-white rounded-full hover:bg-white/20 transition-all border border-white/10 active:scale-90"
                 >
                   <X size={24} />
                 </button>
               </div>
             </div>
 
-            <div className="bg-stone-900 p-8 flex justify-center items-center gap-8">
+            {/* Bottom Controls */}
+            <div className="bg-stone-950 p-10 flex flex-col items-center gap-6">
               <button 
                 onClick={captureAndScan}
                 disabled={isScanningAI}
-                className="w-20 h-20 bg-white rounded-full flex items-center justify-center active:scale-90 transition-all disabled:opacity-50"
+                className="relative group"
               >
-                {isScanningAI ? (
-                  <Loader2 className="animate-spin text-emerald-600" size={32} />
-                ) : (
-                  <div className="w-16 h-16 border-4 border-stone-200 rounded-full flex items-center justify-center">
-                    <ScanLine className="text-stone-900" size={28} />
-                  </div>
-                )}
+                {/* Outer Ring */}
+                <div className="absolute inset-[-8px] border-2 border-emerald-500/30 rounded-full animate-pulse" />
+                
+                {/* Shutter Button */}
+                <div className={cn(
+                  "w-20 h-20 bg-white rounded-full flex items-center justify-center transition-all active:scale-90 shadow-[0_0_30px_rgba(255,255,255,0.2)]",
+                  isScanningAI && "opacity-50 scale-90"
+                )}>
+                  {isScanningAI ? (
+                    <Loader2 className="animate-spin text-emerald-600" size={36} />
+                  ) : (
+                    <div className="w-16 h-16 border-4 border-stone-100 rounded-full flex items-center justify-center bg-stone-50">
+                      <div className="w-12 h-12 bg-emerald-600 rounded-full flex items-center justify-center">
+                        <ScanLine className="text-white" size={24} />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </button>
+              
+              <p className="text-stone-500 text-[10px] uppercase tracking-[0.2em] font-medium">
+                {isScanningAI ? "Analisi in corso..." : "Tocca per scansionare"}
+              </p>
             </div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
