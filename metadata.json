@@ -1,0 +1,7 @@
+{
+  "name": "Flora Inventory",
+  "description": "App semplice per l'inventario di piante e fiori con scansione etichette AI ed esportazione Excel.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
