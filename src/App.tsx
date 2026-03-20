@@ -53,6 +53,7 @@ export default function App() {
   const [chain, setChain] = useState(() => localStorage.getItem('flora_chain') || '');
   const [storeName, setStoreName] = useState(() => localStorage.getItem('flora_store') || '');
   const [isScanning, setIsScanning] = useState(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [isScanningAI, setIsScanningAI] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -112,25 +113,36 @@ export default function App() {
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsScanning(true);
-      }
+      setCameraStream(stream);
+      setIsScanning(true);
     } catch (err) {
       console.error("Error accessing camera:", err);
-      alert("Impossibile accedere alla fotocamera. Controlla i permessi.");
+      alert("Impossibile accedere alla fotocamera. Controlla i permessi nelle impostazioni del browser.");
     }
   };
 
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      setIsScanning(false);
+  const stopCamera = useCallback(() => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
     }
-  };
+    setIsScanning(false);
+  }, [cameraStream]);
+
+  // Attach stream to video element when it's ready
+  useEffect(() => {
+    if (isScanning && cameraStream && videoRef.current) {
+      videoRef.current.srcObject = cameraStream;
+      // Explicit play for iOS
+      videoRef.current.play().catch(e => console.error("Video play error:", e));
+    }
+  }, [isScanning, cameraStream]);
 
   const captureAndScan = async () => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -237,13 +249,12 @@ export default function App() {
 
   const exportToExcel = async () => {
     const data = items.map(item => ({
-      Tipo: item.type,
+      Tipo: item.type === 'PIANTA' ? 'Pianta' : 'Mazzo',
       Articolo: item.article,
+      Dettaglio: item.type === 'PIANTA' ? `Ø ${item.potDiameter} cm` : `${item.stemsCount} steli`,
       Quantità: item.quantity,
-      Prezzo: item.price,
-      'Diametro Vaso (cm)': item.potDiameter || '-',
-      'Numero Steli': item.stemsCount || '-',
-      Totale: item.price * item.quantity
+      'Prezzo (€)': item.price,
+      'Totale (€)': item.price * item.quantity
     }));
 
     const ws = XLSX.utils.json_to_sheet(data);
@@ -263,11 +274,12 @@ export default function App() {
       const file = new File([blob], fileName, { type: blob.type });
 
       // Check if sharing is supported
+      const shareTitle = `Inventario ${chain || 'Flora'} - ${storeName || 'Negozio'} (${dateStr})`;
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: 'Inventario Flora',
-          text: 'Ecco l\'inventario aggiornato del negozio.',
+          title: shareTitle,
+          text: `In allegato l'inventario aggiornato per ${chain || 'Flora'} - ${storeName || 'Negozio'} del ${dateStr}.`,
         });
       } else {
         // Fallback to standard download
@@ -629,6 +641,7 @@ export default function App() {
                 ref={videoRef} 
                 autoPlay 
                 playsInline 
+                muted
                 className="w-full h-full object-cover"
               />
               
